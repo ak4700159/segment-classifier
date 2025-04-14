@@ -1,0 +1,9 @@
+
+**/test/**
+**/train/**
+*.csv
+*.pth
+*.xlsx
+
+__pycache__
+cachedir
