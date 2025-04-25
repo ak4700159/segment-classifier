@@ -39,3 +39,11 @@ Python 3.9.0
     │  ID  │ 기준년월   │ 성별 │ 신용등급 │ 매출  │ 청구금액 │ ... │ Segment │
     └──────┴──────────┴────┴───────┴─────┴───────┴────┴────┘
 
+    [CONCAT] customer_train_df: shape (2400000, 78)
+    [CONCAT] credit_train_df: shape (2400000, 42)
+    [CONCAT] sales_train_df: shape (2400000, 406)
+    [CONCAT] billing_train_df: shape (2400000, 46)
+    [CONCAT] balance_train_df: shape (2400000, 82)
+    [CONCAT] channel_train_df: shape (2400000, 105)
+    [CONCAT] marketing_train_df: shape (2400000, 64)
+    [CONCAT] performance_train_df: shape (2400000, 49)

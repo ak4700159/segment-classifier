@@ -5,9 +5,9 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from clasifier import MLPClassifier
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score
+from clasifier import DeepMLPClassifier
 
 
 # ============================
@@ -55,6 +55,26 @@ def concat_monthly_data(split):
     return result
 
 # 현재 컴퓨팅 환경에서 전체 데이터를 메모리에 로드하기엔 메모리 부족 에러 발생 
+def reduce_data_by_head_id(dfs_dict, split="train", keep_n_ids=10000):
+    """
+    무작위가 아닌 ID 기준으로 정렬된 상위 N명만 선택
+    """
+    # 기준은 customer info
+    base_df = dfs_dict[f"customer_{split}_df"]
+    sorted_ids = sorted(base_df["ID"].dropna().unique())[:keep_n_ids]
+    id_set = set(sorted_ids)
+
+    print(f"[INFO] 앞에서부터 선택된 ID 수: {len(sorted_ids)}")
+
+    for key in list(dfs_dict.keys()):
+        before = dfs_dict[key].shape[0]
+        dfs_dict[key] = dfs_dict[key][dfs_dict[key]["ID"].isin(id_set)].copy()
+        after = dfs_dict[key].shape[0]
+        print(f"[REDUCE] {key}: {before} → {after}")
+        gc.collect()
+
+    return dfs_dict
+
 def reduce_data_fraction(dfs_dict, split="train", frac=0.1, seed=42):
     """
     각 데이터프레임에서 ID 기준으로 frac 만큼만 샘플링
@@ -78,7 +98,6 @@ def reduce_data_fraction(dfs_dict, split="train", frac=0.1, seed=42):
 
     return dfs_dict
 
-
 # ============================
 # 4. 데이터 병합 함수
 # ============================
@@ -97,7 +116,6 @@ def merge_all_data(dfs_dict, split="train"):
         gc.collect()
 
     return df
-
 
 # ============================
 # 5. 전처리 및 인코딩 함수
@@ -143,25 +161,26 @@ def preprocess(X, X_test, y=None):
         return X_scaled, X_test_scaled, y, le_target
     return X_scaled, X_test_scaled, None, None
 
-
 # ============================
 # 6. 모델 학습 함수
 # ============================
-
 # 파이토치 이용 
-def train_model_pytorch(X, y, epochs=20, batch_size=512, lr=1e-3, device='cuda', save_path='best_model.pth'):
-    # 텐서 변환
+def train_model_pytorch(X, y, hidden_dims=[512, 256, 128], epochs=200, batch_size=256,
+                        lr=0.001, device='cuda', save_path='best_model.pth'):
     X_tensor = torch.tensor(X.values, dtype=torch.float32)
     y_tensor = torch.tensor(y, dtype=torch.long)
 
-    # 데이터로더 생성
     dataset = TensorDataset(X_tensor, y_tensor)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # 모델 구성
-    model = MLPClassifier(input_dim=X.shape[1]).to(device)
+    # 개선된 모델 구성 (유연한 hidden_dims 전달)
+    model = DeepMLPClassifier(input_dim=X.shape[1], hidden_dims=hidden_dims).to(device)
+
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    # ✅ 개선 3: Scheduler 추가
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5, verbose=True)
 
     best_loss = float('inf')
     model.train()
@@ -180,19 +199,20 @@ def train_model_pytorch(X, y, epochs=20, batch_size=512, lr=1e-3, device='cuda',
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item() * xb.size(0)  # 전체 loss 누적
+            total_loss += loss.item() * xb.size(0)
             all_preds.append(torch.argmax(outputs, dim=1).detach().cpu())
             all_labels.append(yb.detach().cpu())
 
-        # 평균 loss 계산
         avg_loss = total_loss / len(dataset)
         preds = torch.cat(all_preds)
         labels = torch.cat(all_labels)
         acc = accuracy_score(labels.numpy(), preds.numpy())
 
+        # ✅ scheduler step
+        scheduler.step(avg_loss)
+
         print(f"[Epoch {epoch:2d}] Loss: {avg_loss:.4f} | Accuracy: {acc * 100:.2f}%")
 
-        # 모델 저장 (가장 낮은 Loss일 때)
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save(model.state_dict(), save_path)
@@ -217,8 +237,8 @@ def generate_submission_pytorch(model, X_test, test_df, le_target, device='cuda'
     test_df["pred_label"] = pred_segments
     submission = test_df.groupby("ID")["pred_label"].agg(lambda x: x.value_counts().idxmax()).reset_index()
     submission.columns = ["ID", "Segment"]
-    submission.to_csv("pytorch_submit.csv", index=False)
-    print("[SAVE] Submission saved to pytorch_submit.csv")
+    submission.to_csv("base_submit.csv", index=False)
+    print("[SAVE] Submission saved to base_submit.csv")
 
 
 # ============================
@@ -230,10 +250,10 @@ def main():
 
     print("=== Concat ===")
     train_dfs = concat_monthly_data("train")
-    train_dfs = reduce_data_fraction(train_dfs, split="train", frac=0.1)
+    train_dfs = reduce_data_fraction(train_dfs, split="train", frac = 0.7)
 
+    # 테스트 데이터는 줄일 필요가 없음
     test_dfs = concat_monthly_data("test")
-    test_dfs = reduce_data_fraction(test_dfs, split="test", frac=0.1)
 
     print("=== Merge ===")
     train_df = merge_all_data(train_dfs, "train")
@@ -244,18 +264,16 @@ def main():
     X = train_df[feature_cols].copy()
     y = train_df["Segment"].copy()
     X_test = test_df.copy()
-    
     X, X_test, y_encoded, le_target = preprocess(X, X_test, y)
-    print("[Check] NaN in X:", np.isnan(X.values).sum())
-    print("[Check] Inf in X:", np.isinf(X.values).sum())
-    print("[Check] y min:", y_encoded.min(), "max:", y_encoded.max())
-    print("[Check] y unique:", np.unique(y_encoded))
 
     print("=== Train ===")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("[TRAIN] device : ", device)
+    # clf = train_tabnet_model(X, y_encoded)
     model = train_model_pytorch(X, y_encoded, device=device)
 
     print("=== Predict & Submit ===")
+    # predict_tabnet_submission(clf, X_test, test_df, le_target)
     generate_submission_pytorch(model, X_test, test_df, le_target, device=device)
 
 

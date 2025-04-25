@@ -4,6 +4,7 @@
 *.csv
 *.pth
 *.xlsx
+*.zip
 
 __pycache__
 cachedir
